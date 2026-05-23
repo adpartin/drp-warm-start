@@ -1,0 +1,26 @@
+# Data and outputs (not checked in)
+data/
+outputs/
+*.parquet
+*.h5
+*.pt
+*.pkl
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
