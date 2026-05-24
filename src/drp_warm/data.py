@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,6 +10,8 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
+
+log = logging.getLogger("drp_warm.data")
 
 
 @dataclass(frozen=True)
@@ -40,10 +43,27 @@ def detect_columns(df: pd.DataFrame, target_candidates: tuple[str, ...] = ("AUC1
 
 
 def load_drp_parquet(path: str | Path) -> tuple[pd.DataFrame, DRPColumns]:
+    """Load a DRP parquet and drop rows with NaN in target or features.
+
+    Some upstream parquets (e.g., `topN_generator` output for certain
+    targets) leak NaN target values into a handful of rows. Those would
+    produce NaN losses during training and silently corrupt the model, so
+    we filter them at load time and log how many were removed.
+    """
     df = pd.read_parquet(path)
     cols = detect_columns(df)
     keep = [cols.target] + cols.feature_columns
-    return df[keep].reset_index(drop=True), cols
+    df = df[keep].reset_index(drop=True)
+
+    n_before = len(df)
+    df = df.dropna(subset=keep).reset_index(drop=True)
+    n_dropped = n_before - len(df)
+    if n_dropped:
+        log.warning(
+            "dropped %d rows with NaN in target or features (%.4f%% of %d)",
+            n_dropped, 100.0 * n_dropped / n_before, n_before,
+        )
+    return df, cols
 
 
 class DRPDataset(Dataset):
@@ -54,8 +74,14 @@ class DRPDataset(Dataset):
             raise ValueError(
                 f"features and targets length mismatch: {features.shape[0]} vs {targets.shape[0]}"
             )
-        self.features = torch.from_numpy(np.asarray(features, dtype=np.float32))
-        self.targets = torch.from_numpy(np.asarray(targets, dtype=np.float32))
+        features = np.asarray(features, dtype=np.float32)
+        targets = np.asarray(targets, dtype=np.float32)
+        if np.isnan(targets).any() or np.isnan(features).any():
+            raise ValueError(
+                "DRPDataset received NaN values; load via load_drp_parquet() to filter them."
+            )
+        self.features = torch.from_numpy(features)
+        self.targets = torch.from_numpy(targets)
 
     def __len__(self) -> int:
         return self.features.shape[0]
