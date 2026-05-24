@@ -6,6 +6,13 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
+    # NOTE: the default PyPI wheel for torch may be built for a CUDA runtime
+    # newer than the system driver. If `python -c "import torch; torch.cuda.is_available()"`
+    # raises a driver-too-old error, reinstall torch with a matching CUDA wheel:
+    #
+    #     pip install torch --index-url https://download.pytorch.org/whl/cu124
+    #
+    # (or cu121 / cu118 / cpu — pick to match `nvidia-smi`'s reported CUDA version).
     "torch>=2.2",
     "numpy>=1.26",
     "pandas>=2.1",
@@ -24,6 +31,7 @@ dev = [
 [project.scripts]
 drp-split = "drp_warm.cli:split_main"
 drp-train-warm = "drp_warm.cli:train_warm_main"
+drp-train-continue = "drp_warm.cli:continue_main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

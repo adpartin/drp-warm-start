@@ -133,6 +133,18 @@ regeneration.
 - Checkpointing every epoch produces ~300 files for a 300-epoch warm run;
   ensure `outputs/` is on a disk with enough space (~a few GB for the full
   sweep).
+- **PyTorch CUDA wheel mismatch.** The default PyPI torch wheel targets a
+  CUDA runtime newer than some Lambda boxes' drivers. If
+  `torch.cuda.is_available()` raises `The NVIDIA driver on your system is
+  too old`, check `nvidia-smi` for the supported CUDA version and reinstall
+  torch from the matching index:
+  ```bash
+  pip uninstall -y torch
+  pip install torch --index-url https://download.pytorch.org/whl/cu124   # or cu121 / cu118
+  ```
+- **Multi-GPU box, single-GPU job.** Prefer `CUDA_VISIBLE_DEVICES=N python ...
+  --device cuda` over `--device cuda:N`. The script stays GPU-agnostic and
+  parallel invocations don't need code changes.
 
 ## Reproduction targets (qualitative)
 
@@ -144,6 +156,63 @@ regeneration.
 
 These are sanity targets, not pass/fail thresholds — environment and
 hyperparameter drift can shift absolute numbers.
+
+## Experimental hypothesis (continue-phase / cross-distribution transfer)
+
+The headline question this repo is set up to answer:
+
+> When fine-tuning a partition-A-pretrained model on partition B (no shared
+> cells, no shared drugs), does CLR provide a *qualitative* advantage over
+> fixed-LR SGD / Adam, or only a quantitative one?
+
+**Hypothesis to test** (carried from the original 2018 PoC's intent): the
+high-LR phase of triangular CLR provides escape velocity from the
+partition-A basin that fine-LR SGD cannot supply at its converged learning
+rate, so naive SGD/Adam fine-tuning stalls while CLR fine-tuning succeeds.
+
+**Literature backing.** Saddle points dominate high-dimensional DL loss
+landscapes (Dauphin et al. 2014). LR cycling / warm restarts are a
+recognized mechanism for escaping inherited basins during transfer
+(Loshchilov & Hutter SGDR 2017; Smith CLR 2017). So the *direction* of the
+hypothesis is well-supported.
+
+**Where the hypothesis can overreach.** Literature typically reports CLR /
+SGDR as *faster* than fixed-LR, not *categorically required*. A binary
+"SGD fails, CLR succeeds" outcome would be stronger than the norm and
+should be backed by direct evidence in this repo's results — not asserted
+from the 2018 recollection. We have already observed on partition A that
+CLR and fixed-LR `5e-4` produce indistinguishable val MAE / R² when
+training from scratch; the case for CLR's uniqueness has to live in the
+cross-distribution continue phase, if anywhere.
+
+### Experimental matrix (continue phase)
+
+| warm init | continue schedule | continue LR | purpose |
+|---|---|---|---|
+| from-scratch on B (`outputs/ref/`) | clr | 1e-4 → 1e-3 | baseline; defines `ref_min` |
+| `outputs/warm_clr/` `weps=300` | clr | 1e-4 → 1e-3 | original PoC configuration |
+| `outputs/warm_clr/` `weps=300` | fixed | 1e-4 | low fixed (tests "SGD stalls" claim) |
+| `outputs/warm_clr/` `weps=300` | fixed | 5e-4 | fair fixed-LR baseline (CLR's geo-mean) |
+| `outputs/warm_clr/` `weps=300` | fixed | 1e-3 | upper-LR comparison (CLR's max) |
+
+Three additional runs sweep `weps ∈ {50, 150, 300}` with the CLR continue
+schedule to reproduce the ceps-vs-weps speedup curve. Result vector per
+run: `ceps` (epochs to reach `ref_min × 1.02`), final val MAE, final val R².
+
+### What to watch for in results
+
+1. **All schedules should beat from-scratch.** If even fixed-LR `1e-4`
+   reaches the target faster than the reference's full convergence, warm-
+   start works regardless of schedule.
+2. **CLR's marginal advantage.** If CLR converges only 1.5–3× faster than
+   the best fixed LR, the honest story is "warm-start is the lever; CLR
+   is the schedule choice." If CLR is the *only* schedule that converges
+   at all (others plateau above target), that's the stronger 2018-style
+   claim and we can lead with it.
+3. **Per-LR variance.** Fixed-LR with too-small `lr` will be slow; with
+   too-large `lr` may oscillate. The dispersion across fixed-LR values is
+   itself informative — large dispersion suggests CLR's robustness
+   matters; small dispersion suggests the choice doesn't.
 
 ## Out of scope for this repo
 

@@ -89,9 +89,22 @@ python scripts/02_train_warm.py \
     --lr-mode clr \
     --base-lr 1e-4 --max-lr 1e-3
 
-# 3. Continue-phase training (fine-tune from a warm checkpoint).
-#    Lands in the next development phase.
+# 3. Continue-phase training: fine-tune a warm checkpoint on partition B
+#    with target-driven early stopping.
+python scripts/03_train_continue.py \
+    --warm-dir outputs/warm_clr/ \
+    --weps 300 \
+    --data data/splits/partition_b.parquet \
+    --output outputs/continue_weps300/ \
+    --ref-dir outputs/ref/ \
+    --ref-margin 0.02 \
+    --epochs 300 \
+    --lr-mode clr --base-lr 1e-4 --max-lr 1e-3
 ```
+
+The `--ref-dir` flag derives the early-stop target from the reference run's
+`history.csv` as `min(val_mae) × (1 + --ref-margin)`. Use `--target-val-mae`
+instead if you want to pass an absolute value.
 
 ### LR scheduling modes
 
@@ -123,14 +136,19 @@ drp-warm-start/
 │   ├── split.py         # disjoint (cell, drug) partitioning
 │   ├── model.py         # MLP regressor
 │   ├── train.py         # warm-phase training loop (CLR or fixed LR)
+│   ├── continue_train.py # continue-phase fine-tune with target early-stop
+│   ├── callbacks.py     # EarlyStoppingByMetric
 │   └── cli.py           # CLI entry points
 ├── scripts/
 │   ├── 01_split.py
-│   └── 02_train_warm.py
+│   ├── 02_train_warm.py
+│   └── 03_train_continue.py
 ├── tests/
 │   ├── test_split.py
 │   ├── test_model.py
-│   └── test_train.py
+│   ├── test_train.py
+│   ├── test_callbacks.py
+│   └── test_continue.py
 └── notebooks/
 ```
 
