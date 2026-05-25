@@ -33,6 +33,24 @@ Three stages:
 Reproduces the qualitative behavior of the original 2018 PoC — see
 [Provenance](#provenance).
 
+## Results (2026-05 reproduction, AUC1 on Top6)
+
+Anchored in `outputs/auc1_continue_clr_weps300` vs `outputs/auc1_ref`:
+
+- **5× fewer epochs** to reach the original PoC's reported reference
+  accuracy (val MAE ≈ 0.07) via warm-start fine-tuning, under strict
+  disjoint (cell, drug) splits.
+- Speedup is target-dependent: **26×** at loose targets, **5×** at the
+  2018 PoC accuracy bar, **~1.6×** at the modern reference's tight
+  convergence point (val MAE ≤ 0.066).
+- CLR beats every fixed LR within its sweep range. At `weps=300`:
+  CLR 74 epochs < fixed 1e-3 86 < fixed 5e-4 113. Fixed at the low end
+  (1e-4) doesn't converge in 600 epochs — one end of the curve.
+
+The 2018 PoC's headline ≥50× speedup does not fully reproduce in this
+setup (we top out at ~26× at very loose targets). See `CLAUDE.md` for
+the full result tables.
+
 ## Data
 
 Input: a single parquet file with one row per (cell, drug) observation and
@@ -42,19 +60,20 @@ columns:
 - `GE_*` — gene expression features
 - `DD_*` — drug descriptor features
 
-The Top6 aggregate used in the original PoC can be regenerated from raw
-NCI / CCLE / GDSC source files using
-<https://github.com/hyoo/topN_generator>:
+The canonical input is Top6 with **AUC1** as the target (matches the
+2018 PoC's metric). Regenerate from raw NCI / CCLE / GDSC source files
+using <https://github.com/hyoo/topN_generator>:
 
 ```bash
 python build.py --top_n 6 --drug_descriptor dragon7 \
                 --cell_feature rnaseq --cell_feature_subset lincs1000 \
-                --format parquet
+                --target AUC1 --format parquet
 ```
 
-Default Top6 produces 270,426 (cell, drug) samples spanning 355 cell lines
-and 1,572 drugs across 6 cancer types, with 942 GE features and 5,270 DD
-features.
+Top6 with AUC1 produces 271,575 (cell, drug) samples spanning 355 cell
+lines and 1,572 drugs across 6 cancer types, with 942 GE features and
+5,270 DD features. 12 NaN-target rows are dropped at load → 271,563
+used.
 
 `topN_generator` is treated as an external upstream tool, not vendored into
 this repo. See `CLAUDE.md` for the rationale.
@@ -166,10 +185,13 @@ drp-warm-start/
 
 Originally developed in 2018–2019 under the DOE Pilot 1 / ECP CANDLE
 program as a Keras / TensorFlow 1.x proof-of-concept. The original PoC
-reported ≥50× epoch speedup (up to ~65×) and val R² ≈ 0.65 / val MAE ≈
-0.070 on AUC under joint disjoint (cell, drug) splits on Top6. This repo
-aims to reproduce the qualitative result on the same Top6 data using a
-modern PyTorch stack.
+reported ≥50× epoch speedup (up to ~65×) on AUC1 under joint disjoint
+(cell, drug) splits on Top6. This PyTorch reimplementation reproduces
+the warm-start workflow on the same Top6 data; measured speedup is 5×
+at the 2018 PoC's accuracy bar (up to 26× at looser targets) — the
+original ≥50× headline does not fully reproduce here. See
+[Results](#results-2026-05-reproduction-auc1-on-top6) for the full
+picture.
 
 ## References
 

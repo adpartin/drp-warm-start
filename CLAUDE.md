@@ -61,16 +61,21 @@ to work around the libomp conflict. On Linux / Lambda this is not needed.
 pip install -e ".[dev]"
 
 # Partition data
-python scripts/01_split.py --input data/top_6.parquet \
-    --output data/splits/ --split-by both
+python scripts/01_split.py --input data/top_6.auc1.parquet \
+    --output data/auc1_splits/ --split-by both
 
-# Warm-phase training (CLR)
-python scripts/02_train_warm.py --data data/splits/partition_a.parquet \
-    --output outputs/warm_clr/ --epochs 300 --lr-mode clr
+# Warm-phase training (CLR) on partition A
+python scripts/02_train_warm.py --data data/auc1_splits/partition_a.parquet \
+    --output outputs/auc1_warm_clr/ --epochs 300 --lr-mode clr
 
-# Warm-phase training (fixed-LR baseline; for the Day-5 head-to-head)
-python scripts/02_train_warm.py --data data/splits/partition_a.parquet \
-    --output outputs/warm_fixed/ --epochs 300 --lr-mode fixed
+# Reference baseline (from-scratch on partition B with CLR)
+python scripts/02_train_warm.py --data data/auc1_splits/partition_b.parquet \
+    --output outputs/auc1_ref/ --epochs 300 --lr-mode clr
+
+# Continue-phase training (CLR fine-tune from warm checkpoint)
+python scripts/03_train_continue.py --warm-dir outputs/auc1_warm_clr/ --weps 300 \
+    --data data/auc1_splits/partition_b.parquet --output outputs/auc1_continue_clr_weps300/ \
+    --ref-dir outputs/auc1_ref/ --epochs 300 --lr-mode clr
 ```
 
 ## Data contract
@@ -87,18 +92,19 @@ the data loader assume this without requiring explicit CELL / DRUG columns.
 
 ## Data is *not* in the repo
 
-`data/` and `outputs/` are gitignored. The default expectation is the Top6
-parquet produced by <https://github.com/hyoo/topN_generator> with:
+`data/` and `outputs/` are gitignored. The canonical input is the Top6
+parquet with **AUC1** as the target (matches the 2018 PoC's metric),
+produced by <https://github.com/hyoo/topN_generator>:
 
 ```bash
 python build.py --top_n 6 --drug_descriptor dragon7 \
                 --cell_feature rnaseq --cell_feature_subset lincs1000 \
-                --format parquet
+                --target AUC1 --format parquet
 ```
 
-Default Top6 produces 270,426 rows × 355 cells × 1,572 drugs across 6 cancer
-types, with 942 GE features and 5,270 DD features. See README for raw input
-file list.
+Top6 with AUC1: 271,575 rows × 355 cells × 1,572 drugs across 6 cancer
+types, 942 GE features, 5,270 DD features. 12 NaN-target rows are dropped
+at load → 271,563 used. See README for the raw input file list.
 
 ## On vendoring `topN_generator`
 
@@ -146,73 +152,58 @@ regeneration.
   --device cuda` over `--device cuda:N`. The script stays GPU-agnostic and
   parallel invocations don't need code changes.
 
-## Reproduction targets (qualitative)
+## Results (2026-05 reproduction, AUC1 on Top6)
 
-- Continue phase from `weps ∈ {50, 150, 300}` should converge to the
-  reference val MAE in dramatically fewer epochs than the from-scratch
-  reference. Original PoC reported ≥50× (up to ~65×).
-- A from-scratch reference run with CLR should reach val MAE ≈ 0.07 / val
-  R² ≈ 0.65 on AUC over the Top6 disjoint partition.
+Source of truth: each run's `result.json` + `history.csv` under
+`outputs/auc1_*/`. Analysis script: `notebooks/analyze_results.py`
+(use `--prefix auc1_`).
 
-These are sanity targets, not pass/fail thresholds — environment and
-hyperparameter drift can shift absolute numbers.
+### Reference baseline (from-scratch on partition B with CLR)
+- `outputs/auc1_ref/`, 300 epochs
+- `ref_min` = 0.06432
+- First reaches `target = ref_min × 1.02 = 0.06560` at epoch 121
 
-## Experimental hypothesis (continue-phase / cross-distribution transfer)
+### ceps-vs-weps (CLR continue, target = `ref_min × 1.02`)
+| weps | ceps | speedup |
+|---:|---:|---:|
+| 50  | 72 | 1.68× |
+| 150 | 84 | 1.44× |
+| 300 | 74 | 1.64× |
 
-The headline question this repo is set up to answer:
+Essentially flat — weps choice barely affects ceps past 50 warm epochs.
 
-> When fine-tuning a partition-A-pretrained model on partition B (no shared
-> cells, no shared drugs), does CLR provide a *qualitative* advantage over
-> fixed-LR SGD / Adam, or only a quantitative one?
+### CLR vs fixed-LR continue (weps=300, four schedules)
+| schedule | ceps | converged | final val MAE |
+|---|---:|---|---:|
+| CLR (1e-4 → 1e-3) | 74 | ✓ | 0.06552 |
+| Fixed 1e-3 (high end of CLR range) | 86 | ✓ | 0.06546 |
+| Fixed 5e-4 (mid range) | 113 | ✓ | 0.06555 |
+| Fixed 1e-4 (low end / warm-trained LR) | 600 (cap) | ✗ | 0.06631 |
 
-**Hypothesis to test** (carried from the original 2018 PoC's intent): the
-high-LR phase of triangular CLR provides escape velocity from the
-partition-A basin that fine-LR SGD cannot supply at its converged learning
-rate, so naive SGD/Adam fine-tuning stalls while CLR fine-tuning succeeds.
+**Main finding: CLR beats every fixed LR within its sweep range.**
+Mixing of high- and low-LR phases beats either extreme as a fixed
+value. Fixed 1e-4 (the low end) doesn't converge in 600 epochs — one
+end of the curve, not a special property of 1e-4.
 
-**Literature backing.** Saddle points dominate high-dimensional DL loss
-landscapes (Dauphin et al. 2014). LR cycling / warm restarts are a
-recognized mechanism for escaping inherited basins during transfer
-(Loshchilov & Hutter SGDR 2017; Smith CLR 2017). So the *direction* of the
-hypothesis is well-supported.
+### Speedup-vs-target (`auc1_continue_clr_weps300` vs `auc1_ref`)
+| target val MAE | ref ep | continue ep | speedup |
+|---:|---:|---:|---:|
+| 0.100  | 26  | 1  | 26×  |
+| 0.080  | 37  | 3  | 12×  |
+| 0.070  | 61  | 12 | 5.1× ← 2018 PoC's reported reference accuracy |
+| 0.0656 | 121 | 74 | 1.6× ← modern tight target (`ref_min × 1.02`) |
 
-**Where the hypothesis can overreach.** Literature typically reports CLR /
-SGDR as *faster* than fixed-LR, not *categorically required*. A binary
-"SGD fails, CLR succeeds" outcome would be stronger than the norm and
-should be backed by direct evidence in this repo's results — not asserted
-from the 2018 recollection. We have already observed on partition A that
-CLR and fixed-LR `5e-4` produce indistinguishable val MAE / R² when
-training from scratch; the case for CLR's uniqueness has to live in the
-cross-distribution continue phase, if anywhere.
+Speedup is target-dependent — large at loose targets (pre-trained
+checkpoint already partway down the loss curve), modest at tight ones
+(both warm-continue and ref approach the same MAE floor). Headline
+number: **5× at the 2018 PoC's accuracy bar**, up to 26× at very loose
+targets, ~1.6× at the modern tight target.
 
-### Experimental matrix (continue phase)
-
-| warm init | continue schedule | continue LR | purpose |
-|---|---|---|---|
-| from-scratch on B (`outputs/ref/`) | clr | 1e-4 → 1e-3 | baseline; defines `ref_min` |
-| `outputs/warm_clr/` `weps=300` | clr | 1e-4 → 1e-3 | original PoC configuration |
-| `outputs/warm_clr/` `weps=300` | fixed | 1e-4 | low fixed (tests "SGD stalls" claim) |
-| `outputs/warm_clr/` `weps=300` | fixed | 5e-4 | fair fixed-LR baseline (CLR's geo-mean) |
-| `outputs/warm_clr/` `weps=300` | fixed | 1e-3 | upper-LR comparison (CLR's max) |
-
-Three additional runs sweep `weps ∈ {50, 150, 300}` with the CLR continue
-schedule to reproduce the ceps-vs-weps speedup curve. Result vector per
-run: `ceps` (epochs to reach `ref_min × 1.02`), final val MAE, final val R².
-
-### What to watch for in results
-
-1. **All schedules should beat from-scratch.** If even fixed-LR `1e-4`
-   reaches the target faster than the reference's full convergence, warm-
-   start works regardless of schedule.
-2. **CLR's marginal advantage.** If CLR converges only 1.5–3× faster than
-   the best fixed LR, the honest story is "warm-start is the lever; CLR
-   is the schedule choice." If CLR is the *only* schedule that converges
-   at all (others plateau above target), that's the stronger 2018-style
-   claim and we can lead with it.
-3. **Per-LR variance.** Fixed-LR with too-small `lr` will be slow; with
-   too-large `lr` may oscillate. The dispersion across fixed-LR values is
-   itself informative — large dispersion suggests CLR's robustness
-   matters; small dispersion suggests the choice doesn't.
+### What did not reproduce
+- The 2018 PoC's headline **≥50× speedup**. Our reproduction tops out
+  at ~26× (very loose targets), 5× at the 2018 accuracy bar. Likely
+  Keras vs PyTorch initialization / optimizer-state differences. Don't
+  claim 50× when discussing this repo's results.
 
 ## Out of scope for this repo
 
